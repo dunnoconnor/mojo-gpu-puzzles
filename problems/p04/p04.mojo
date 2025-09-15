@@ -18,9 +18,13 @@ fn add_10_2d(
     row = thread_idx.y
     col = thread_idx.x
     # FILL ME IN (roughly 2 lines)
+    # Guard statement to avoid out-of-bounds memory access
     if row<size and col<size:
-        output[row*size+col]=a[row*size+col]+10
-        
+        # Converting 2D coordinates to 1D memory indices
+        idx = row*size+col
+        # Perform the addition operation
+        output[idx]=a[idx]+10
+
 # ANCHOR_END: add_10_2d
 
 
