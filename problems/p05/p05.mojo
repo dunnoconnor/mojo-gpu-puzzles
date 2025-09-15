@@ -19,6 +19,12 @@ fn broadcast_add(
     row = thread_idx.y
     col = thread_idx.x
     # FILL ME IN (roughly 2 lines)
+    #Guard statement to avoid out-of-bounds memory access
+    if row<size and col<size:
+        #Converting 2D coordinates to 1D memory indices in row-major order
+        idx = row*size+col
+        #Perform the addition operation with broadcasting
+        output[idx]=a[col]+b[row]
 
 
 # ANCHOR_END: broadcast_add
