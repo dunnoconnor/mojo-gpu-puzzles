@@ -15,9 +15,12 @@ fn add_10_blocks(
     a: UnsafePointer[Scalar[dtype]],
     size: Int,
 ):
+    # Compute the global thread index
     i = block_dim.x * block_idx.x + thread_idx.x
     # FILL ME IN (roughly 2 lines)
+    # Guard statement to avoid out-of-bounds memory access
     if i<size:
+        # Perform the addition operation
         output[i]=a[i]+10
 
 # ANCHOR_END: add_10_blocks
