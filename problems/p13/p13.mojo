@@ -27,28 +27,26 @@ fn conv_1d_simple[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 14 lines)
+    # Use shared memory to load input array and convolution kernel
     shared_a = tb[dtype]().row_major[SIZE]().shared().alloc()
     shared_b = tb[dtype]().row_major[CONV]().shared().alloc()
+    # Load data into shared memory
     if global_i < SIZE:
         shared_a[local_i] = a[global_i]
-
     if global_i < CONV:
         shared_b[local_i] = b[global_i]
-
+    
+    # Synchronize to ensure all data is loaded
     barrier()
 
-    # Safe and correct:
     if global_i < SIZE:
-        # Note: using `var` allows us to include the type in the type inference
-        # `out.element_type` is available in LayoutTensor
+        # Perform convolution
         var local_sum: output.element_type = 0
-
-        # Note: `@parameter` decorator unrolls the loop at compile time given `CONV` is a compile-time constant
         @parameter
         for j in range(CONV):
             if local_i + j < SIZE:
                 local_sum += shared_a[local_i + j] * shared_b[j]
-
+        # Write result to output
         output[global_i] = local_sum
 
 # ANCHOR_END: conv_1d_simple
