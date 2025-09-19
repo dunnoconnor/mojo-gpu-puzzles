@@ -29,7 +29,38 @@ fn axis_sum[
     local_i = thread_idx.x
     batch = block_idx.y
     # FILL ME IN (roughly 15 lines)
+    cache = tb[dtype]().row_major[TPB]().shared().alloc()
+    # load data into shared memory
+    if local_i < size:
+        cache[local_i] = a[batch, local_i]
+    else:
+        # padding with 0 if the size is not multiple of TPB
+        cache[local_i] = 0
 
+    # ensure all threads have loaded their data
+    barrier()
+    # reduction in shared memory
+    stride = TPB // 2
+    while stride > 0:
+        # Read phase: all threads read the values they need
+        var temp_val: output.element_type = 0
+        if local_i < stride:
+            temp_val = cache[local_i + stride]
+
+        # ensure all threads have read their data to prevent race conditions
+        barrier()
+
+        # Write phase: all threads safely write their computed values
+        if local_i < stride:
+            cache[local_i] += temp_val
+
+        barrier()
+        # Update stride for the next iteration
+        stride //= 2
+
+    # writing with local thread = 0 that has the sum for each batch
+    if local_i == 0:
+        output[batch, 0] = cache[0]
 
 # ANCHOR_END: axis_sum
 
