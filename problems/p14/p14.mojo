@@ -25,25 +25,31 @@ fn prefix_sum_simple[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 18 lines)
+    
+    # Use shared memory to perform prefix sum (scan) within a block
     shared = tb[dtype]().row_major[TPB]().shared().alloc()
     if global_i < size:
         shared[local_i] = a[global_i]
 
+    # Synchronize to ensure all data is loaded
     barrier()
 
+    # Up-sweep (reduce) phase
     offset = 1
     for i in range(Int(log2(Scalar[dtype](TPB)))):
         var current_val: output.element_type = 0
         if local_i >= offset and local_i < size:
-            current_val = shared[local_i - offset]  # read
+            current_val = shared[local_i - offset]
 
         barrier()
         if local_i >= offset and local_i < size:
             shared[local_i] += current_val
 
         barrier()
+        # Update offset for the next iteration
         offset *= 2
-
+   
+    # Down-sweep phase
     if global_i < size:
         output[global_i] = shared[local_i]
 
