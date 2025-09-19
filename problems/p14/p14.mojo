@@ -25,6 +25,28 @@ fn prefix_sum_simple[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 18 lines)
+    shared = tb[dtype]().row_major[TPB]().shared().alloc()
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    offset = 1
+    for i in range(Int(log2(Scalar[dtype](TPB)))):
+        var current_val: output.element_type = 0
+        if local_i >= offset and local_i < size:
+            current_val = shared[local_i - offset]  # read
+
+        barrier()
+        if local_i >= offset and local_i < size:
+            shared[local_i] += current_val
+
+        barrier()
+        offset *= 2
+
+    if global_i < size:
+        output[global_i] = shared[local_i]
+
 
 
 # ANCHOR_END: prefix_sum_simple
@@ -48,6 +70,31 @@ fn prefix_sum_local_phase[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 20 lines)
+    shared = tb[dtype]().row_major[TPB]().shared().alloc()
+
+    if global_i < size:
+        shared[local_i] = a[global_i]
+
+    barrier()
+
+    offset = 1
+    for i in range(Int(log2(Scalar[dtype](TPB)))):
+        var current_val: output.element_type = 0
+        if local_i >= offset and local_i < TPB:
+            current_val = shared[local_i - offset]  # read
+
+        barrier()
+        if local_i >= offset and local_i < TPB:
+            shared[local_i] += current_val  # write
+
+        barrier()
+        offset *= 2
+
+    if global_i < size:
+        output[global_i] = shared[local_i]
+
+    if local_i == TPB - 1:
+        output[size + block_idx.x] = shared[local_i]
 
 
 # Kernel 2: Add block sums to their respective blocks
@@ -55,8 +102,17 @@ fn prefix_sum_block_sum_phase[
     layout: Layout
 ](output: LayoutTensor[mut=False, dtype, layout], size: Int):
     global_i = block_dim.x * block_idx.x + thread_idx.x
-    # FILL ME IN (roughly 3 lines)
 
+    # Second pass: add previous block's sum to each element
+    # Block 0: No change needed - already correct
+    # Block 1: Add Block 0's sum (28) to each element
+    #   Before: [8,17,27,38,50,63,77]
+    #   After: [36,45,55,66,78,91,105]
+    # Final result combines both blocks:
+    # [0,1,3,6,10,15,21,28, 36,45,55,66,78,91,105]
+    if block_idx.x > 0 and global_i < size:
+        prev_block_sum = output[size + block_idx.x - 1]
+        output[global_i] += prev_block_sum
 
 # ANCHOR_END: prefix_sum_complete
 

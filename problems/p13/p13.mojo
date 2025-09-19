@@ -27,7 +27,7 @@ fn conv_1d_simple[
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # FILL ME IN (roughly 14 lines)
-        shared_a = tb[dtype]().row_major[SIZE]().shared().alloc()
+    shared_a = tb[dtype]().row_major[SIZE]().shared().alloc()
     shared_b = tb[dtype]().row_major[CONV]().shared().alloc()
     if global_i < SIZE:
         shared_a[local_i] = a[global_i]
