@@ -54,6 +54,24 @@ fn single_block_matmul[
     local_row = thread_idx.y
     local_col = thread_idx.x
     # FILL ME IN (roughly 12 lines)
+    # Allocate shared memory for A and B tiles
+    a_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+    b_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+    # Load A and B tiles into shared memory
+    if row < size and col < size:
+        a_shared[local_row, local_col] = a[row, col]
+        b_shared[local_row, local_col] = b[row, col]
+    # Synchronize to make sure the tiles are loaded
+    barrier()
+    # Each thread computes one element of the output matrix
+    if row < size and col < size:
+        var acc: output.element_type = 0
+        # Compute the dot product using the shared memory tiles
+        @parameter
+        for k in range(size):
+            acc += a_shared[local_row, k] * b_shared[k, local_col]
+        # Write the result to the output matrix
+        output[row, col] = acc
 
 
 # ANCHOR_END: single_block_matmul
