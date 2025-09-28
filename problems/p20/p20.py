@@ -25,7 +25,7 @@ def conv1d_pytorch(input_tensor: torch.Tensor, kernel_tensor: torch.Tensor) -> t
     conv1d = ops.conv1d[{"input_size": input_tensor.shape[0], "conv_size": kernel_tensor.shape[0]}]
 
     # FILL IN with 1 line of code
-
+    torch.compile(conv1d)(output_tensor, input_tensor, kernel_tensor)
     return output_tensor
 
 # ANCHOR_END: conv1d_pytorch
