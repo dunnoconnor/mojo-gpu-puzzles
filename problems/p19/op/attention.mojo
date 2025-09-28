@@ -17,6 +17,7 @@ alias D = 16 # This must be equal to D in p19.py
 alias SOFTMAX_BLOCK_DIM_X = 1 << log2_ceil(SEQ_LEN)
 alias TPB = 16
 
+
 # Tiled matrix multiplication from p14 - adapted for attention
 fn matmul_idiomatic_tiled[
     layout: Layout,
@@ -36,7 +37,7 @@ fn matmul_idiomatic_tiled[
     tiled_col = block_idx.x * TPB + local_col
 
     # Get the tile of the output matrix that this thread block is responsible for
-    out_tile = output.tile[TPB, TPB](block_idx.y, block_idx.x)
+    output_tile = output.tile[TPB, TPB](block_idx.y, block_idx.x)
     a_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc().fill(0)
     b_shared = tb[dtype]().row_major[TPB, TPB]().shared().alloc().fill(0)
 
@@ -67,10 +68,10 @@ fn matmul_idiomatic_tiled[
 
     # Write final result with bounds checking (needed for attention's variable sizes)
     if tiled_row < rows and tiled_col < cols:
-        out_tile[local_row, local_col] = acc
+        output_tile[local_row, local_col] = acc
 
 
-# ANCHOR: transpose_kernel
+# ANCHOR: transpose_kernel_solution
 fn transpose_kernel[
     layout_in: Layout,  # Layout for input matrix (seq_len, d)
     layout_out: Layout,  # Layout for output matrix (d, seq_len)
@@ -81,11 +82,32 @@ fn transpose_kernel[
     output: LayoutTensor[mut=True, dtype, layout_out, MutableAnyOrigin],
     inp: LayoutTensor[mut=False, dtype, layout_in, MutableAnyOrigin],
 ):
-    # FILL ME IN (roughly 18 lines)
-    ...
+    """Transpose matrix using shared memory tiling for coalesced access."""
+    shared_tile = tb[dtype]().row_major[TPB, TPB]().shared().alloc()
+
+    local_row = thread_idx.y
+    local_col = thread_idx.x
+
+    global_row = block_idx.y * TPB + local_row
+    global_col = block_idx.x * TPB + local_col
+
+    if global_row < rows and global_col < cols:
+        shared_tile[local_row, local_col] = inp[global_row, global_col]
+    else:
+        shared_tile[local_row, local_col] = 0.0
+
+    barrier()
+
+    out_row = block_idx.x * TPB + local_row
+    out_col = block_idx.y * TPB + local_col
+
+    # Store data from shared memory to global memory (coalesced write)
+    # Note: we transpose the shared memory access pattern
+    if out_row < cols and out_col < rows:
+        output[out_row, out_col] = shared_tile[local_col, local_row]
 
 
-# ANCHOR_END: transpose_kernel
+# ANCHOR_END: transpose_kernel_solution
 
 
 # Apply softmax to attention scores taken from p16
@@ -169,7 +191,7 @@ fn attention_cpu_kernel[
         scores.append(0.0)
         weights.append(0.0)
 
-    # CPU: Compute attention scores K[i] · Q directly for each row i of K
+    # Compute attention scores: Q · K[i] for each row i of K
     for i in range(seq_len):
         var score: Float32 = 0.0
         for dim in range(d):
@@ -236,7 +258,6 @@ struct AttentionCustomOp:
 
         @parameter
         if target == "gpu":
-            # ANCHOR: attention_orchestration
             var gpu_ctx = rebind[DeviceContext](ctx[])
 
             # Define layouts for matrix multiplication
@@ -279,31 +300,67 @@ struct AttentionCustomOp:
                 k_t_buf.unsafe_ptr()
             )
 
+            # ANCHOR: attention_orchestration_solution
+
             # Step 1: Reshape Q from (d,) to (1, d) - no buffer needed
-            # FILL ME IN 1 line
+            q_2d = q_tensor.reshape[layout_q_2d]()
 
             # Step 2: Transpose K from (seq_len, d) to K^T (d, seq_len)
-            # FILL ME IN 1 function call
+            gpu_ctx.enqueue_function[
+                transpose_kernel[layout_k, layout_k_t, seq_len, d, dtype]
+            ](
+                k_t,
+                k_tensor,
+                grid_dim=transpose_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
 
             # Step 3: Compute attention scores using matmul: Q @ K^T = (1, d) @ (d, seq_len) -> (1, seq_len)
-            # GPU: Uses matrix multiplication to compute all Q · K[i] scores in parallel
+            # This computes Q · K^T[i] = Q · K[i] for each column i of K^T (which is row i of K)
             # Reuse scores_weights_buf as (1, seq_len) for scores
-            # FILL ME IN 2 lines
+            scores_2d = LayoutTensor[
+                mut=True, dtype, layout_scores_2d, MutableAnyOrigin
+            ](scores_weights_buf.unsafe_ptr())
+            gpu_ctx.enqueue_function[
+                matmul_idiomatic_tiled[layout_q_2d, 1, seq_len, d, dtype]
+            ](
+                scores_2d,
+                q_2d,
+                k_t,
+                grid_dim=scores_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
 
             # Step 4: Reshape scores from (1, seq_len) to (seq_len,) for softmax
-            # FILL ME IN 1 line
+            weights = scores_2d.reshape[layout_scores]()
 
             # Step 5: Apply softmax to get attention weights
-            # FILL ME IN 1 function call
+            gpu_ctx.enqueue_function[
+                softmax_gpu_kernel[layout_scores, seq_len, dtype]
+            ](
+                weights,
+                weights,
+                grid_dim=softmax_blocks_per_grid,
+                block_dim=softmax_threads,
+            )
 
             # Step 6: Reshape weights from (seq_len,) to (1, seq_len) for final matmul
-            # FILL ME IN 1 line
+            weights_2d = weights.reshape[layout_weights_2d]()
 
             # Step 7: Compute final result using matmul: weights @ V = (1, seq_len) @ (seq_len, d) -> (1, d)
             # Reuse out_tensor reshaped as (1, d) for result
-            # FILL ME IN 2 lines
+            result_2d = output_tensor.reshape[layout_result_2d]()
+            gpu_ctx.enqueue_function[
+                matmul_idiomatic_tiled[layout_weights_2d, 1, d, seq_len, dtype]
+            ](
+                result_2d,
+                weights_2d,
+                v_tensor,
+                grid_dim=result_blocks_per_grid,
+                block_dim=matmul_threads_per_block,
+            )
 
-            # ANCHOR_END: attention_orchestration
+            # ANCHOR_END: attention_orchestration_solution
 
         elif target == "cpu":
             attention_cpu_kernel[
