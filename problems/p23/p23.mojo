@@ -17,7 +17,6 @@ alias layout = Layout.row_major(SIZE)
 alias dtype = DType.float32
 alias SIMD_WIDTH = simd_width_of[dtype, target = get_gpu_target()]()
 
-
 fn elementwise_add[
     layout: Layout, dtype: DType, simd_width: Int, rank: Int, size: Int
 ](
@@ -32,9 +31,14 @@ fn elementwise_add[
         simd_width: Int, rank: Int, alignment: Int = align_of[dtype]()
     ](indices: IndexList[rank]) capturing -> None:
         idx = indices[0]
-        print("idx:", idx)
         # FILL IN (2 to 4 lines)
-
+        # SIMD within threads, warp across threads, block across warps
+        a_simd = a.load[simd_width](idx, 0)
+        b_simd = b.load[simd_width](idx, 0)
+        ret = a_simd + b_simd
+        output.store[simd_width](idx, 0, ret)
+    
+    # Launch the elementwise operation on the GPU
     elementwise[add, SIMD_WIDTH, target="gpu"](a.size(), ctx)
 
 
@@ -64,14 +68,26 @@ fn tiled_elementwise_add[
         simd_width: Int, rank: Int, alignment: Int = align_of[dtype]()
     ](indices: IndexList[rank]) capturing -> None:
         tile_id = indices[0]
-        print("tile_id:", tile_id)
+        # print("tile_id:", tile_id)
         output_tile = output.tile[tile_size](tile_id)
         a_tile = a.tile[tile_size](tile_id)
         b_tile = b.tile[tile_size](tile_id)
 
         # FILL IN (6 lines at most)
-
+        # 1. Loop over the elements in the tile
+        # 2. Load simd_width elements from a and b
+        # 3. Perform the addition
+        # 4. Store the result back to output
+        @parameter
+        for i in range(tile_size):
+            a_vec = a_tile.load[simd_width](i, 0)
+            b_vec = b_tile.load[simd_width](i, 0)
+            ret = a_vec + b_vec
+            output_tile.store[simd_width](i, 0, ret)
+    
+    # Number of tiles needed: each tile processes tile_size elements
     num_tiles = (size + tile_size - 1) // tile_size
+    # Launch the tiled elementwise operation on the GPU
     elementwise[process_tiles, 1, target="gpu"](num_tiles, ctx)
 
 
@@ -93,7 +109,7 @@ fn manual_vectorized_tiled_elementwise_add[
     b: LayoutTensor[mut=False, dtype, layout, MutableAnyOrigin],
     ctx: DeviceContext,
 ) raises:
-    # Each tile contains tile_size groups of simd_width elements
+    # Each tile contains tile_size * simd_width elements
     alias chunk_size = tile_size * simd_width
 
     @parameter
@@ -108,6 +124,21 @@ fn manual_vectorized_tiled_elementwise_add[
         b_tile = b.tile[chunk_size](tile_id)
 
         # FILL IN (7 lines at most)
+        # 1. Loop over the simd groups in the tile
+        # 2. Compute the global start index for each simd group
+        # 3. Load simd_width elements from a and b using global_start
+        # 4. Perform the addition
+        # 5. Store the result back to output using global_start
+        @parameter
+        for i in range(tile_size):
+            global_start = tile_id * chunk_size + i * simd_width
+
+            a_vec = a.load[simd_width](global_start, 0)
+            b_vec = b.load[simd_width](global_start, 0)
+            ret = a_vec + b_vec
+            # print("tile:", tile_id, "simd_group:", i, "global_start:", global_start, "a_vec:", a_vec, "b_vec:", b_vec, "result:", ret)
+
+            output.store[simd_width](global_start, 0, ret)
 
     # Number of tiles needed: each tile processes chunk_size elements
     num_tiles = (size + chunk_size - 1) // chunk_size
@@ -156,6 +187,22 @@ fn vectorize_within_tiles_elementwise_add[
         )
 
         # FILL IN (9 lines at most)
+        # 1. Define a vectorized function to add simd_width elements
+        # 2. Compute the global index for each element in the tile
+        # 3. Load simd_width elements from a and b using global index
+        # 4. Perform the addition
+        # 5. Store the result back to output using global index
+        @parameter
+        fn vectorized_add[width: Int](i: Int):
+            global_idx = tile_start + i
+            if global_idx + width <= size:
+                a_vec = a.load[width](global_idx, 0)
+                b_vec = b.load[width](global_idx, 0)
+                result = a_vec + b_vec
+                output.store[width](global_idx, 0, result)
+
+        # Use vectorize within each tile
+        vectorize[vectorized_add, simd_width](actual_tile_size)
 
     num_tiles = (size + tile_size - 1) // tile_size
     elementwise[
