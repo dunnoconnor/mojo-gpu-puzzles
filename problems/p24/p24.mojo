@@ -77,7 +77,17 @@ fn simple_warp_dot_product[
 ):
     global_i = block_dim.x * block_idx.x + thread_idx.x
     # FILL IN (6 lines at most)
+    # Each thread computes one partial product using vectorized approach as values in Mojo are SIMD based
+    var partial_product: Scalar[dtype] = 0
+    if global_i < size:
+        partial_product = (a[global_i] * b[global_i]).reduce_add()
 
+    # warp_sum() replaces all the shared memory + barriers + tree reduction
+    total = warp_sum(partial_product)
+
+    # Only lane 0 writes the result (all lanes have the same total)
+    if lane_id() == 0:
+        output[0] = total
 
 # ANCHOR_END: simple_warp_kernel
 
@@ -99,8 +109,28 @@ fn functional_warp_dot_product[
         simd_width: Int, rank: Int, alignment: Int = align_of[dtype]()
     ](indices: IndexList[rank]) capturing -> None:
         idx = indices[0]
-        print("idx:", idx)
+        # print("idx:", idx)
         # FILL IN (10 lines at most)
+        # Each thread computes one partial product
+        var partial_product: Scalar[dtype] = 0.0
+        if idx < size:
+            a_val = a.load[1](idx, 0)
+            b_val = b.load[1](idx, 0)
+            partial_product = (a_val * b_val).reduce_add()
+        else:
+            partial_product = 0.0
+
+        # Warp magic - combines all WARP_SIZE partial products!
+        total = warp_sum(partial_product)
+
+        # Only lane 0 writes the result (all lanes have the same total)
+        if lane_id() == 0:
+            output.store[1](0, 0, total)
+
+    # Launch exactly WARP_SIZE threads (one warp) to process all elements
+    elementwise[compute_dot_product, 1, target="gpu"](WARP_SIZE, ctx)
+
+
 
     # Launch exactly WARP_SIZE threads (one warp) to process all elements
     elementwise[compute_dot_product, 1, target="gpu"](WARP_SIZE, ctx)
