@@ -34,7 +34,21 @@ fn block_sum_dot_product[
     local_i = thread_idx.x
 
     # FILL IN (roughly 6 lines)
+    # Each thread computes partial product
+    var partial_product: Scalar[dtype] = 0.0
+    if global_i < size:
+        # LayoutTensor indexing `[0]` returns the underlying SIMD value
+        partial_product = a[global_i][0] * b[global_i][0]
 
+    # The magic: block.sum() replaces 15+ lines of manual reduction!
+    # Just like warp.sum() but for the entire block
+    total = block.sum[block_size=tpb, broadcast=False](
+        val=SIMD[DType.float32, 1](partial_product)
+    )
+
+    # Only thread 0 writes the result
+    if local_i == 0:
+        output[0] = total[0]
 
 # ANCHOR_END: block_sum_dot_product
 
@@ -104,26 +118,40 @@ fn block_histogram_bin_extract[
     local_i = thread_idx.x
 
     # Step 1: Each thread determines its bin and element value
+    var my_value: Scalar[dtype] = 0.0
+    var my_bin: Int = -1
 
-    # FILL IN (roughly 9 lines)
+    if global_i < size:
+        # `[0]` returns the underlying SIMD value
+        my_value = input_data[global_i][0]
+        # Bin values [0.0, 1.0) into num_bins buckets
+        my_bin = Int(floor(my_value * num_bins))
+        # Clamp to valid range
+        if my_bin >= num_bins:
+            my_bin = num_bins - 1
+        if my_bin < 0:
+            my_bin = 0
 
     # Step 2: Create predicate for target bin extraction
-
-    # FILL IN (roughly 3 line)
+    var belongs_to_target: Int = 0
+    if global_i < size and my_bin == target_bin:
+        belongs_to_target = 1
 
     # Step 3: Use block.prefix_sum() for parallel bin extraction!
     # This computes where each thread should write within the target bin
-
-    # FILL IN (1 line)
+    write_offset = block.prefix_sum[
+        dtype = DType.int32, block_size=tpb, exclusive=True
+    ](val=SIMD[DType.int32, 1](belongs_to_target))
 
     # Step 4: Extract and pack elements belonging to target_bin
-
-    # FILL IN (roughly 2 line)
+    if belongs_to_target == 1:
+        bin_output[Int(write_offset[0])] = my_value
 
     # Step 5: Final thread computes total count for this bin
-
-    # FILL IN (roughly 3 line)
-
+    if local_i == tpb - 1:
+        # Inclusive sum = exclusive sum + my contribution
+        total_count = write_offset[0] + belongs_to_target
+        count_output[0] = total_count
 
 # ANCHOR_END: block_histogram
 
@@ -152,25 +180,32 @@ fn block_normalize_vector[
     local_i = thread_idx.x
 
     # Step 1: Each thread loads its element
-
-    # FILL IN (roughly 3 lines)
+    var my_value: Scalar[dtype] = 0.0
+    if global_i < size:
+        my_value = input_data[global_i][0]  # Extract SIMD value
 
     # Step 2: Use block.sum() to compute total sum (familiar from earlier!)
-
-    # FILL IN (1 line)
+    total_sum = block.sum[block_size=tpb, broadcast=False](
+        val=SIMD[DType.float32, 1](my_value)
+    )
 
     # Step 3: Thread 0 computes mean value
-
-    # FILL IN (roughly 4 lines)
+    var mean_value: Scalar[dtype] = 1.0  # Default to avoid division by zero
+    if local_i == 0:
+        if total_sum[0] > 0.0:
+            mean_value = total_sum[0] / Float32(size)
 
     # Step 4: block.broadcast() shares mean to ALL threads!
     # This completes the block operations trilogy demonstration
-
-    # FILL IN (1 line)
+    broadcasted_mean = block.broadcast[
+        dtype = DType.float32, width=1, block_size=tpb
+    ](val=SIMD[DType.float32, 1](mean_value), src_thread=UInt(0))
 
     # Step 5: Each thread normalizes by the mean
+    if global_i < size:
+        normalized_value = my_value / broadcasted_mean[0]
+        output_data[global_i] = normalized_value
 
-    # FILL IN (roughly 3 lines)
 
 
 # ANCHOR_END: block_normalize
