@@ -28,6 +28,17 @@ fn butterfly_pair_swap[
     global_i = block_dim.x * block_idx.x + thread_idx.x
 
     # FILL ME IN (4 lines)
+    if global_i < size:
+        current_val = input[global_i]
+
+        # Exchange with XOR-1 neighbor using butterfly pattern
+        # Lane 0 exchanges with lane 1, lane 2 with lane 3, etc.
+        swapped_val = shuffle_xor(current_val, 1)
+
+        # For demonstration, we'll store the swapped value
+        # In real applications, this might be used for sorting, reduction, etc.
+        output[global_i] = swapped_val
+
 
 
 # ANCHOR_END: butterfly_pair_swap
@@ -50,7 +61,19 @@ fn butterfly_parallel_max[
     global_i = block_dim.x * block_idx.x + thread_idx.x
 
     # FILL ME IN (roughly 7 lines)
+    if global_i < size:
+        max_val = input[global_i]
 
+        # Butterfly reduction tree: dynamic for any WARP_SIZE (32, 64, etc.)
+        # Start with half the warp size and reduce by half each step
+        offset = WARP_SIZE // 2
+        while offset > 0:
+            # Each thread compares its value with its XOR-offset neighbor and keeps the maximum
+            max_val = max(max_val, shuffle_xor(max_val, offset))
+            offset //= 2
+
+        # All threads now have the maximum value across the entire warp
+        output[global_i] = max_val
 
 # ANCHOR_END: butterfly_parallel_max
 
@@ -80,7 +103,22 @@ fn butterfly_conditional_max[
         current_val = input[global_i]
         min_val = current_val
 
-        # FILL ME IN (roughly 11 lines)
+        # Butterfly reduction for both maximum and minimum: dynamic for any WARP_SIZE
+        offset = WARP_SIZE // 2
+        while offset > 0:
+            neighbor_val = shuffle_xor(current_val, offset)
+            current_val = max(current_val, neighbor_val)
+
+            min_neighbor_val = shuffle_xor(min_val, offset)
+            min_val = min(min_val, min_neighbor_val)
+
+            offset //= 2
+
+        # Conditional output: max for even lanes, min for odd lanes
+        if lane % 2 == 0:
+            output[global_i] = current_val  # Maximum
+        else:
+            output[global_i] = min_val  # Minimum
 
 
 # ANCHOR_END: butterfly_conditional_max
@@ -115,7 +153,16 @@ fn warp_inclusive_prefix_sum[
     global_i = block_dim.x * block_idx.x + thread_idx.x
 
     # FILL ME IN (roughly 4 lines)
+    if global_i < size:
+        current_val = input[global_i]
 
+        # This one call replaces ~30 lines of complex shared memory logic from Puzzle 14!
+        # But it only works within the current warp (WARP_SIZE threads)
+        scan_result = prefix_sum[exclusive=False](
+            rebind[Scalar[dtype]](current_val)
+        )
+
+        output[global_i] = scan_result
 
 # ANCHOR_END: warp_inclusive_prefix_sum
 
@@ -149,7 +196,30 @@ fn warp_partition[
     if global_i < size:
         current_val = input[global_i]
 
-        # FILL ME IN (roughly 13 lines)
+        # Phase 1: Create warp-level predicates
+        predicate_left = Float32(1.0) if current_val < pivot else Float32(0.0)
+        predicate_right = Float32(1.0) if current_val >= pivot else Float32(0.0)
+
+        # Phase 2: Warp-level prefix sum to get positions within warp
+        warp_left_pos = prefix_sum[exclusive=True](predicate_left)
+        warp_right_pos = prefix_sum[exclusive=True](predicate_right)
+
+        # Phase 3: Get total left count using shuffle_xor reduction
+        warp_left_total = predicate_left
+
+        # Butterfly reduction to get total across the warp: dynamic for any WARP_SIZE
+        offset = WARP_SIZE // 2
+        while offset > 0:
+            warp_left_total += shuffle_xor(warp_left_total, offset)
+            offset //= 2
+
+        # Phase 4: Write to output positions
+        if current_val < pivot:
+            # Left partition: use warp-level position
+            output[Int(warp_left_pos)] = current_val
+        else:
+            # Right partition: offset by total left count + right position
+            output[Int(warp_left_total + warp_right_pos)] = current_val
 
 
 # ANCHOR_END: warp_partition
