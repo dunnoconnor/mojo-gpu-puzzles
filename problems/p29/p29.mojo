@@ -52,22 +52,72 @@ fn multi_stage_image_blur_pipeline[
     local_i = thread_idx.x
 
     # Stage 1: Load and preprocess (threads 0-127)
-
-    # FILL ME IN (roughly 10 lines)
+    if local_i < STAGE1_THREADS:
+        if global_i < size:
+            input_shared[local_i] = input[global_i] * 1.1
+            # Each thread loads 2 elements
+            if local_i + STAGE1_THREADS < size:
+                input_shared[local_i + STAGE1_THREADS] = (
+                    input[global_i + STAGE1_THREADS] * 1.1
+                )
+        else:
+            # Zero-padding for out-of-bounds
+            input_shared[local_i] = 0.0
+            if local_i + STAGE1_THREADS < TPB:
+                input_shared[local_i + STAGE1_THREADS] = 0.0
 
     barrier()  # Wait for Stage 1 completion
 
     # Stage 2: Apply blur (threads 128-255)
+    if local_i >= STAGE1_THREADS:
+        blur_idx = local_i - STAGE1_THREADS
+        var blur_sum: Scalar[dtype] = 0.0
+        blur_count = 0
 
-    # FILL ME IN (roughly 25 lines)
+        # 5-point blur kernel
+        for offset in range(-BLUR_RADIUS, BLUR_RADIUS + 1):
+            sample_idx = blur_idx + offset
+            if sample_idx >= 0 and sample_idx < TPB:
+                blur_sum += rebind[Scalar[dtype]](input_shared[sample_idx])
+                blur_count += 1
+
+        if blur_count > 0:
+            blur_shared[blur_idx] = blur_sum / blur_count
+        else:
+            blur_shared[blur_idx] = 0.0
+
+        # Process second element
+        second_idx = blur_idx + STAGE1_THREADS
+        if second_idx < TPB:
+            blur_sum = 0.0
+            blur_count = 0
+            for offset in range(-BLUR_RADIUS, BLUR_RADIUS + 1):
+                sample_idx = second_idx + offset
+                if sample_idx >= 0 and sample_idx < TPB:
+                    blur_sum += rebind[Scalar[dtype]](input_shared[sample_idx])
+                    blur_count += 1
+
+            if blur_count > 0:
+                blur_shared[second_idx] = blur_sum / blur_count
+            else:
+                blur_shared[second_idx] = 0.0
 
     barrier()  # Wait for Stage 2 completion
 
     # Stage 3: Final smoothing (all threads)
+    if global_i < size:
+        final_value = blur_shared[local_i]
 
-    # FILL ME IN (roughly 7 lines)
+        # Neighbor smoothing with 0.6 scaling
+        if local_i > 0:
+            final_value = (final_value + blur_shared[local_i - 1]) * 0.6
+        if local_i < TPB - 1:
+            final_value = (final_value + blur_shared[local_i + 1]) * 0.6
+
+        output[global_i] = final_value
 
     barrier()  # Ensure all writes complete
+
 
 
 # ANCHOR_END: multi_stage_pipeline
@@ -118,6 +168,16 @@ fn double_buffered_stencil_computation[
     _ = mbarrier_arrive(init_barrier.ptr)
     _ = mbarrier_test_wait(init_barrier.ptr, TPB)
 
+    # Initialize buffer_A with input data
+    if local_i < TPB and global_i < size:
+        buffer_A[local_i] = input[global_i]
+    else:
+        buffer_A[local_i] = 0.0
+
+    # Wait for buffer_A initialization
+    _ = mbarrier_arrive(init_barrier.ptr)
+    _ = mbarrier_test_wait(init_barrier.ptr, TPB)
+
     # Iterative stencil processing with double-buffering
     @parameter
     for iteration in range(STENCIL_ITERATIONS):
@@ -125,15 +185,43 @@ fn double_buffered_stencil_computation[
         @parameter
         if iteration % 2 == 0:
             # Even iteration: Read from A, Write to B
+            if local_i < TPB:
+                var stencil_sum: Scalar[dtype] = 0.0
+                var stencil_count: Int = 0
 
-            # FILL ME IN (roughly 12 lines)
-            ...
+                # 3-point stencil: [i-1, i, i+1]
+                for offset in range(-1, 2):
+                    sample_idx = local_i + offset
+                    if sample_idx >= 0 and sample_idx < TPB:
+                        stencil_sum += rebind[Scalar[dtype]](
+                            buffer_A[sample_idx]
+                        )
+                        stencil_count += 1
+
+                if stencil_count > 0:
+                    buffer_B[local_i] = stencil_sum / stencil_count
+                else:
+                    buffer_B[local_i] = buffer_A[local_i]
 
         else:
             # Odd iteration: Read from B, Write to A
+            if local_i < TPB:
+                var stencil_sum: Scalar[dtype] = 0.0
+                var stencil_count: Int = 0
 
-            # FILL ME IN (roughly 12 lines)
-            ...
+                # 3-point stencil: [i-1, i, i+1]
+                for offset in range(-1, 2):
+                    sample_idx = local_i + offset
+                    if sample_idx >= 0 and sample_idx < TPB:
+                        stencil_sum += rebind[Scalar[dtype]](
+                            buffer_B[sample_idx]
+                        )
+                        stencil_count += 1
+
+                if stencil_count > 0:
+                    buffer_A[local_i] = stencil_sum / stencil_count
+                else:
+                    buffer_A[local_i] = buffer_B[local_i]
 
         # Memory barrier: wait for all writes before buffer swap
         _ = mbarrier_arrive(iter_barrier.ptr)
